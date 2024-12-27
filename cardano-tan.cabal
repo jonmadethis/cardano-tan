@@ -1,0 +1,62 @@
+cabal-version:      3.0
+name:               cardano-tan
+version:            0.1.0.0
+synopsis:           Fan-Tan gambling game implemented as a Cardano smart contract
+license:            MIT
+author:             JonMadeThis
+maintainer:         jon@jonmadethis.com
+
+common common-deps
+  build-depends:
+    , base ^>=4.14.3.0
+    , aeson
+    , containers
+    , text
+    , bytestring
+    , plutus-tx
+    , plutus-tx-plugin
+    , plutus-contract
+    , plutus-ledger
+    , plutus-ledger-api
+    , plutus-ledger-constraints
+    , data-default
+    , cardano-api
+    , cardano-crypto-class
+    , cardano-ledger-core
+    , cardano-ledger-shelley
+    , cardano-wallet-core
+
+library
+  import: common-deps
+  exposed-modules:
+    FanTan
+    FanTan.Types
+    FanTan.OnChain
+    FanTan.OffChain
+  hs-source-dirs: src
+  default-language: Haskell2010
+  ghc-options:
+    -Wall -fobject-code -fno-ignore-interface-pragmas
+    -fno-omit-interface-pragmas -fno-strictness -fno-spec-constr
+    -fno-specialise
+
+executable cardano-tan
+  import: common-deps
+  main-is: Main.hs
+  hs-source-dirs: app
+  default-language: Haskell2010
+  ghc-options: -Wall
+  build-depends: cardano-tan
+
+test-suite cardano-tan-test
+  import: common-deps
+  type: exitcode-stdio-1.0
+  main-is: Spec.hs
+  hs-source-dirs: test
+  default-language: Haskell2010
+  ghc-options: -Wall
+  build-depends:
+    , cardano-tan
+    , tasty
+    , tasty-hunit
+    , tasty-quickcheck
