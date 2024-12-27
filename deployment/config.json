@@ -1,0 +1,32 @@
+{
+    "testnet": {
+        "networkMagic": 1097911063,
+        "epochLength": 432000,
+        "systemStart": "2019-07-24T20:20:16Z",
+        "slotsPerKESPeriod": 129600,
+        "slotLength": 1,
+        "maxKESEvolutions": 62,
+        "securityParam": 2160
+    },
+    "mainnet": {
+        "networkMagic": 764824073,
+        "epochLength": 432000,
+        "systemStart": "2017-09-23T21:44:51Z",
+        "slotsPerKESPeriod": 129600,
+        "slotLength": 1,
+        "maxKESEvolutions": 62,
+        "securityParam": 2160
+    },
+    "contract": {
+        "minBetAmount": 5000000,
+        "timeout": 86400000,
+        "refundDelay": 86400000
+    },
+    "deployment": {
+        "metadata": {
+            "name": "Fan-Tan Contract",
+            "version": "1.0.0",
+            "description": "Smart contract implementation of the Fan-Tan game"
+        }
+    }
+}
