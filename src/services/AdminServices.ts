@@ -1,162 +1,267 @@
-import { Lucid } from 'lucid-cardano';
+import { Lucid, Tx, TxHash, UTxO } from 'lucid-cardano';
 import { ContractService } from './ContractService';
 import { AnalyticsService } from './AnalyticsService';
+import { TransactionMonitor } from './TransactionMonitor';
+
+export interface AdminConfig {
+    adminAddresses: string[];
+    healthCheckInterval: number;
+    criticalThresholds: {
+        errorRate: number;
+        responseTime: number;
+        minimumBalance: bigint;
+        maxPendingGames: number;
+    };
+    emergencyTimeouts: {
+        pauseDuration: number;
+        recoveryDuration: number;
+        alertExpiration: number;
+    };
+}
 
 export interface ContractHealth {
     status: 'healthy' | 'warning' | 'critical';
-    totalValue: bigint;
-    activeGames: number;
-    lastUpdate: Date;
-    errorRate: number;
-    avgResponseTime: number;
+    details: {
+        totalValue: bigint;
+        activeGames: number;
+        pendingTransactions: number;
+        lastBlockHeight: number;
+        utxoCount: number;
+        memoryUsage: number;
+    };
+    metrics: {
+        transactionSuccessRate: number;
+        averageResponseTime: number;
+        peakConcurrentGames: number;
+        totalPlayersToday: number;
+    };
+    alerts: Array<{
+        severity: 'low' | 'medium' | 'high';
+        message: string;
+        timestamp: number;
+    }>;
+    lastUpdate: number;
 }
 
 export interface GameParameters {
-    minBet: bigint;
-    maxBet: bigint;
-    timeout: number;
-    houseFee: number;
-    minimumUtxo: bigint;
-}
-
-export interface EmergencyState {
-    paused: boolean;
-    recoveryMode: boolean;
-    lastEmergencyAction: Date | null;
-    activeAlerts: string[];
+    monetary: {
+        minBet: bigint;
+        maxBet: bigint;
+        houseFee: number;
+        minimumUtxo: bigint;
+    };
+    timing: {
+        bettingPhase: number;
+        revealPhase: number;
+        claimPhase: number;
+        recoveryTimeout: number;
+    };
+    operational: {
+        maxConcurrentGames: number;
+        maxPlayersPerGame: number;
+        requiredConfirmations: number;
+    };
 }
 
 export class AdminService {
-    private lucid: Lucid;
-    private contractService: ContractService;
-    private analyticsService: AnalyticsService;
-    private adminAddress: string;
-    private updateInterval: NodeJS.Timer | null = null;
+    private readonly lucid: Lucid;
+    private readonly config: AdminConfig;
+    private readonly contractService: ContractService;
+    private readonly analyticsService: AnalyticsService;
+    private readonly transactionMonitor: TransactionMonitor;
+    private readonly securityManager: SecurityManager;
+    private monitoringInterval: NodeJS.Timer | null = null;
+    private emergencyState: Map<string, boolean> = new Map();
+    private lastHealthCheck: ContractHealth | null = null;
 
     constructor(
         lucid: Lucid,
+        config: AdminConfig,
         contractService: ContractService,
         analyticsService: AnalyticsService,
-        adminAddress: string
+        transactionMonitor: TransactionMonitor
     ) {
         this.lucid = lucid;
+        this.config = config;
         this.contractService = contractService;
         this.analyticsService = analyticsService;
-        this.adminAddress = adminAddress;
+        this.transactionMonitor = transactionMonitor;
+        this.securityManager = new SecurityManager(config.adminAddresses);
+        this.initializeEmergencyState();
     }
 
-    async getContractHealth(): Promise<ContractHealth> {
-        const metrics = await this.analyticsService.generatePerformanceReport();
-        const utxos = await this.contractService.getContractUtxos();
-        
-        const totalValue = utxos.reduce((sum, utxo) => sum + utxo.assets.lovelace, 0n);
-        const activeGames = await this.contractService.getActiveGameCount();
-        
-        return {
-            status: this.determineHealthStatus(metrics),
-            totalValue,
-            activeGames,
-            lastUpdate: new Date(),
-            errorRate: metrics.errorRate,
-            avgResponseTime: metrics.averageConfirmationTime
-        };
+    public async initiateAdminOperations(): Promise<void> {
+        await this.verifyAdminStatus();
+        await this.startContractMonitoring();
+        await this.initializeSecurityControls();
     }
 
-    async updateGameParameters(params: GameParameters): Promise<string> {
-        if (!await this.verifyAdminAccess()) {
-            throw new Error('Unauthorized access');
+    public async executeAdminAction<T>(
+        action: () => Promise<T>,
+        requiredAccess: 'standard' | 'emergency' = 'standard'
+    ): Promise<T> {
+        if (!await this.verifyAdminAccess(requiredAccess)) {
+            throw new Error('Unauthorized admin action attempted');
         }
 
-        const tx = await this.contractService.updateParameters(params);
-        return await this.submitAdminTransaction(tx);
-    }
-
-    async toggleEmergencyMode(mode: 'pause' | 'recovery'): Promise<EmergencyState> {
-        if (!await this.verifyAdminAccess()) {
-            throw new Error('Unauthorized access');
-        }
-
-        const currentState = await this.getEmergencyState();
-        const newState: EmergencyState = {
-            ...currentState,
-            [mode === 'pause' ? 'paused' : 'recoveryMode']: 
-                !currentState[mode === 'pause' ? 'paused' : 'recoveryMode'],
-            lastEmergencyAction: new Date()
-        };
-
-        await this.updateEmergencyState(newState);
-        return newState;
-    }
-
-    async addDealer(dealerPkh: string): Promise<string> {
-        if (!await this.verifyAdminAccess()) {
-            throw new Error('Unauthorized access');
-        }
-
-        const tx = await this.contractService.addAuthorizedDealer(dealerPkh);
-        return await this.submitAdminTransaction(tx);
-    }
-
-    async removeDealer(dealerPkh: string): Promise<string> {
-        if (!await this.verifyAdminAccess()) {
-            throw new Error('Unauthorized access');
-        }
-
-        const tx = await this.contractService.removeAuthorizedDealer(dealerPkh);
-        return await this.submitAdminTransaction(tx);
-    }
-
-    async startMonitoring(): Promise<void> {
-        if (this.updateInterval) return;
-
-        this.updateInterval = setInterval(async () => {
-            try {
-                const health = await this.getContractHealth();
-                
-                if (health.status === 'critical') {
-                    await this.handleCriticalState(health);
-                }
-
-                // Update monitoring metrics
-                await this.analyticsService.trackHealthMetrics(health);
-            } catch (error) {
-                console.error('Monitoring error:', error);
-            }
-        }, 30000); // Monitor every 30 seconds
-    }
-
-    async stopMonitoring(): Promise<void> {
-        if (this.updateInterval) {
-            clearInterval(this.updateInterval);
-            this.updateInterval = null;
-        }
-    }
-
-    private async verifyAdminAccess(): Promise<boolean> {
-        const address = await this.lucid.wallet.address();
-        return address === this.adminAddress;
-    }
-
-    private async submitAdminTransaction(tx: any): Promise<string> {
         try {
-            const signedTx = await tx.sign().complete();
-            return await signedTx.submit();
+            const result = await action();
+            await this.logAdminAction(action.name, 'success');
+            return result;
         } catch (error) {
-            console.error('Admin transaction failed:', error);
-            throw new Error('Failed to submit admin transaction');
+            await this.logAdminAction(action.name, 'failure', error);
+            throw error;
         }
     }
 
-    private determineHealthStatus(metrics: any): ContractHealth['status'] {
-        if (metrics.errorRate > 0.1 || metrics.averageConfirmationTime > 300) {
+    public async getContractHealth(): Promise<ContractHealth> {
+        const healthData = await this.collectHealthMetrics();
+        const status = this.evaluateHealthStatus(healthData);
+        const alerts = await this.generateHealthAlerts(healthData);
+
+        this.lastHealthCheck = {
+            status,
+            details: healthData.details,
+            metrics: healthData.metrics,
+            alerts,
+            lastUpdate: Date.now()
+        };
+
+        return this.lastHealthCheck;
+    }
+
+    public async updateGameParameters(params: GameParameters): Promise<TxHash> {
+        return await this.executeAdminAction(async () => {
+            await this.validateGameParameters(params);
+            const tx = await this.constructParameterUpdateTx(params);
+            return await this.submitAdminTransaction(tx);
+        });
+    }
+
+    public async toggleEmergencyControl(
+        control: 'pause' | 'recovery',
+        enable: boolean
+    ): Promise<void> {
+        await this.executeAdminAction(async () => {
+            await this.validateEmergencyAction(control);
+            await this.executeEmergencyControl(control, enable);
+            await this.notifyEmergencyStateChange(control, enable);
+        }, 'emergency');
+    }
+
+    public async manageDealer(
+        dealerPkh: string,
+        action: 'add' | 'remove'
+    ): Promise<TxHash> {
+        return await this.executeAdminAction(async () => {
+            await this.validateDealerAction(dealerPkh, action);
+            const tx = await this.constructDealerManagementTx(dealerPkh, action);
+            return await this.submitAdminTransaction(tx);
+        });
+    }
+
+    private async validateGameParameters(params: GameParameters): Promise<void> {
+        if (params.monetary.minBet >= params.monetary.maxBet) {
+            throw new Error('Invalid bet limits configuration');
+        }
+        if (params.timing.bettingPhase <= 0 || params.timing.revealPhase <= 0) {
+            throw new Error('Invalid phase timing configuration');
+        }
+        if (params.operational.maxConcurrentGames <= 0) {
+            throw new Error('Invalid operational parameters');
+        }
+    }
+
+    private async constructParameterUpdateTx(params: GameParameters): Promise<Tx> {
+        const currentParams = await this.contractService.getCurrentParameters();
+        return this.contractService.createParameterUpdateTx(currentParams, params);
+    }
+
+    private async submitAdminTransaction(tx: Tx): Promise<TxHash> {
+        const signedTx = await tx.sign().complete();
+        const txHash = await signedTx.submit();
+        await this.transactionMonitor.addAdminTransaction(txHash);
+        return txHash;
+    }
+
+    private async collectHealthMetrics(): Promise<any> {
+        const [utxos, metrics, games] = await Promise.all([
+            this.contractService.getContractUtxos(),
+            this.analyticsService.generatePerformanceReport(),
+            this.contractService.getActiveGames()
+        ]);
+
+        return {
+            details: this.compileHealthDetails(utxos, games),
+            metrics: metrics
+        };
+    }
+
+    private evaluateHealthStatus(healthData: any): ContractHealth['status'] {
+        const { errorRate, responseTime } = healthData.metrics;
+        const { totalValue } = healthData.details;
+
+        if (
+            errorRate > this.config.criticalThresholds.errorRate ||
+            responseTime > this.config.criticalThresholds.responseTime ||
+            totalValue < this.config.criticalThresholds.minimumBalance
+        ) {
             return 'critical';
         }
-        if (metrics.errorRate > 0.05 || metrics.averageConfirmationTime > 180) {
-            return 'warning';
-        }
+
+        // Additional health evaluation logic
+
         return 'healthy';
     }
 
-    private async handleCriticalState(health: ContractHealth): Promise<void> {
+    private async verifyAdminAccess(level: 'standard' | 'emergency'): Promise<boolean> {
+        const address = await this.lucid.wallet.address();
+        return this.securityManager.verifyAccess(address, level);
+    }
+
+    private async startContractMonitoring(): Promise<void> {
+        if (this.monitoringInterval) {
+            return;
+        }
+
+        this.monitoringInterval = setInterval(
+            async () => {
+                try {
+                    const health = await this.getContractHealth();
+                    await this.handleHealthUpdate(health);
+                } catch (error) {
+                    await this.handleMonitoringError(error);
+                }
+            },
+            this.config.healthCheckInterval
+        );
+    }
+
+    private async handleHealthUpdate(health: ContractHealth): Promise<void> {
+        if (health.status === 'critical') {
+            await this.handleCriticalHealth(health);
+        }
+        await this.analyticsService.recordHealthMetrics(health);
+    }
+
+    private async handleCriticalHealth(health: ContractHealth): Promise<void> {
         // Implement emergency response procedures
-        const emergencyState = await this.getEm
+        await this.notifyAdministrators(health);
+        if (this.shouldActivateEmergencyMode(health)) {
+            await this.toggleEmergencyControl('pause', true);
+        }
+    }
+
+    private shouldActivateEmergencyMode(health: ContractHealth): boolean {
+        // Implement emergency mode activation logic
+        return false;
+    }
+}
+
+class SecurityManager {
+    constructor(private readonly authorizedAddresses: string[]) {}
+
+    public verifyAccess(address: string, level: 'standard' | 'emergency'): boolean {
+        return this.authorizedAddresses.includes(address);
+    }
+}
