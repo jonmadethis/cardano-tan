@@ -1,0 +1,63 @@
+# Haskell/Cabal
+dist
+dist-*
+cabal-dev
+*.o
+*.hi
+*.chi
+*.chs.h
+*.dyn_o
+*.dyn_hi
+.hpc
+.hsenv
+.cabal-sandbox/
+cabal.sandbox.config
+*.prof
+*.aux
+*.hp
+*.eventlog
+.stack-work/
+cabal.project.local
+cabal.project.local~
+.HTF/
+.ghc.environment.*
+
+# Plutus specific
+*.flat
+*.plutus
+*.cbor
+
+# Cardano Node
+node.socket
+protocol.json
+node.config
+
+# Development/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Deployment
+deployment/testnet/
+deployment/mainnet/
+*.addr
+*.skey
+*.vkey
+*.signed
+
+# Logs
+*.log
+logs/
+tmp/
+
+# Environment
+.env
+.env.local
+.env.test
+.env.production
+
+# OS specific
+.DS_Store
+Thumbs.db
